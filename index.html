@@ -1,0 +1,271 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QR Attendance Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f3f5f9;
+      color: #172033;
+      max-width: 650px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .panel {
+      background: white;
+      border-radius: 16px;
+      padding: 22px;
+      box-shadow: 0 5px 20px #0000000d;
+    }
+    h1 { margin-top: 0; }
+    label {
+      display: block;
+      margin-top: 14px;
+      font-weight: bold;
+    }
+    input {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 12px;
+      margin-top: 6px;
+      border: 1px solid #ccd2dc;
+      border-radius: 8px;
+      font-size: 16px;
+    }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-top: 16px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    .primary { background: #185abd; color: white; }
+    .secondary { background: #e8edf5; color: #172033; }
+    #reader { width: 100%; margin-top: 16px; }
+    #status { margin-top: 14px; white-space: pre-wrap; }
+    .hint { color: #626c7d; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>QR Attendance Scanner</h1>
+    <p class="hint">Scan a participant QR code using your Mac camera.</p>
+
+    <label for="training">Training title</label>
+    <input id="training" placeholder="Enter training title">
+
+    <button class="primary" onclick="startScanner()">Start camera</button>
+    <button class="secondary" onclick="stopScanner()">Stop camera</button>
+
+    <div id="reader"></div>
+    <p id="status">Camera is stopped.</p>
+
+    <section id="review" hidden>
+      <h2>Confirm participant</h2>
+
+      <label for="name">Employee name</label>
+      <input id="name" placeholder="Full name">
+
+      <label for="department">Department</label>
+      <input id="department" placeholder="Department">
+
+      <button class="primary" onclick="saveAttendance()">Save attendance</button>
+      <button class="secondary" onclick="clearReview()">Cancel scan</button>
+    </section>
+  </div>
+
+<script>
+  const SCRIPT_URL =
+    'https://script.google.com/a/macros/scrubbed.net/s/AKfycby0txLyEYwJm5Iv1J4lzo3nFqIO6qWrO5K5cNVhNJ_ossakMKtWWJW8SToRMiEbMyUUAA/exec';
+
+  let scanner = null;
+  let busy = false;
+  let lastText = '';
+
+  function status(message) {
+    document.getElementById('status').textContent = message;
+  }
+
+  async function startScanner() {
+    if (scanner) return;
+
+    try {
+      scanner = new Html5Qrcode('reader');
+
+      await scanner.start(
+        { facingMode: 'user' },
+        { fps: 10, qrbox: { width: 250, height: 250 } },
+        onScan,
+        () => {}
+      );
+
+      status('Camera active. Point it at a participant QR code.');
+    } catch (err) {
+      scanner = null;
+      status('Could not start camera: ' + err);
+    }
+  }
+
+  async function stopScanner() {
+    if (!scanner) return;
+
+    try {
+      if (scanner.isScanning) await scanner.stop();
+      await scanner.clear();
+    } catch (err) {
+      console.warn(err);
+    } finally {
+      scanner = null;
+    }
+  }
+
+  async function onScan(decodedText) {
+    if (busy || decodedText === lastText) return;
+
+    busy = true;
+    lastText = decodedText;
+    await stopScanner();
+
+    const person = parseQR(decodedText);
+
+    document.getElementById('name').value = person.name || '';
+    document.getElementById('department').value =
+      person.department || '';
+    document.getElementById('review').hidden = false;
+
+    status('QR scanned. Review the participant details before saving.');
+  }
+
+  function parseQR(raw) {
+    // Supports JSON, URL query parameters, and simple key:value lines.
+    try {
+      const obj = JSON.parse(raw);
+      return {
+        name: findValue(obj, [
+          'name', 'fullname', 'full_name', 'employeeName',
+          'employee_name', 'participant'
+        ]),
+        department: findValue(obj, [
+          'department', 'dept', 'team', 'division'
+        ])
+      };
+    } catch (e) {}
+
+    try {
+      const url = new URL(raw);
+      if (url.search) {
+        return {
+          name: findParam(url.searchParams, [
+            'name', 'fullname', 'full_name',
+            'employeeName', 'employee_name', 'participant'
+          ]),
+          department: findParam(url.searchParams, [
+            'department', 'dept', 'team', 'division'
+          ])
+        };
+      }
+    } catch (e) {}
+
+    const result = { name: '', department: '' };
+
+    raw.split(/\r?\n/).forEach(line => {
+      const match = line.match(/^\s*([^:=]+)\s*[:=]\s*(.*?)\s*$/);
+      if (!match) return;
+
+      const key = match[1].toLowerCase().replace(/[\s_-]/g, '');
+      const value = match[2];
+
+      if (['name', 'fullname', 'employeename', 'participant'].includes(key)) {
+        result.name = value;
+      }
+      if (['department', 'dept', 'team', 'division'].includes(key)) {
+        result.department = value;
+      }
+    });
+
+    return result;
+  }
+
+  function findValue(obj, aliases) {
+    for (const key of Object.keys(obj || {})) {
+      if (aliases.includes(key.toLowerCase().replace(/[\s_-]/g, ''))) {
+        return String(obj[key] ?? '');
+      }
+    }
+    return '';
+  }
+
+  function findParam(params, aliases) {
+    for (const [key, value] of params.entries()) {
+      if (aliases.includes(key.toLowerCase().replace(/[\s_-]/g, ''))) {
+        return value;
+      }
+    }
+    return '';
+  }
+
+  async function saveAttendance() {
+    const trainingTitle = document.getElementById('training').value.trim();
+    const name = document.getElementById('name').value.trim();
+    const department = document.getElementById('department').value.trim();
+
+    if (!trainingTitle || !name || !department) {
+      status('Please complete the training title, employee name, and department.');
+      return;
+    }
+
+    if (!SCRIPT_URL.startsWith('https://script.google.com/')) {
+      status('Please configure your Apps Script /exec URL in index.html.');
+      return;
+    }
+
+    status('Sending attendance to Google Sheets...');
+
+    // URL-encoded form avoids a browser CORS preflight.
+    // no-cors does not expose the server response to this webpage.
+    const data = new URLSearchParams({
+      trainingTitle,
+      name,
+      department
+    });
+
+    try {
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        body: data
+      });
+
+      document.getElementById('review').hidden = true;
+      document.getElementById('name').value = '';
+      document.getElementById('department').value = '';
+      lastText = '';
+      busy = false;
+
+      status(
+        'Attendance request sent. Check your Google Sheet to confirm it was saved.'
+      );
+
+      await startScanner();
+    } catch (err) {
+      status('Could not send attendance. Check your connection and try again.');
+      busy = false;
+    }
+  }
+
+  function clearReview() {
+    document.getElementById('review').hidden = true;
+    document.getElementById('name').value = '';
+    document.getElementById('department').value = '';
+    lastText = '';
+    busy = false;
+    startScanner();
+  }
+</script>
+</body>
+</html>
